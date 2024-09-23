@@ -1,0 +1,87 @@
+1. airflow helm 레포 등록
+  helm repo add apache-airflow https://airflow.apache.org
+  helm repo update
+
+2. 네임스페이스 정의
+  kubectl create namespace airflow
+
+3. 차트 다운로드
+  helm pull apache-airflow/airflow --untar
+
+    executor: Airflow 실행 모드를 설정합니다. CeleryExecutor, LocalExecutor, 또는 KubernetesExecutor를 사용할 수 있습니다.
+    postgresql: PostgreSQL 데이터베이스를 사용하는 경우 설정합니다.
+    redis: CeleryExecutor 또는 KubernetesExecutor를 사용할 때 Redis가 필요합니다.
+    workers: Airflow 워커 파드의 개수를 설정할 수 있습니다.
+
+
+4. UI 노드포트 오픈
+  # Service 설정
+  web:
+    service:
+      type: NodePort    # Service 타입을 NodePort로 변경
+      port: 8080        # 서비스 포트
+      nodePort: 30080   # 노드포트, 사용할 포트를 지정 (예: 30080)
+
+5. 차트 인스톨
+  cd airflow
+  helm install airflow ./ --namespace airflow --create-namespace -f values.yaml
+
+6. 쿠버네티스 버전을 탐 (1.19 이상.)
+  따라서 다른 서버에서 실행시 nfs 통해 공유할것.
+  
+  50.145
+    rsync -avh helm_chart /nfs_share/airflow/
+  실행 서버
+    mount -t nfs 192.168.50.41:/nfs_share [mnt_point]
+    cd ${mnt_point}/helm_chart/airflow/
+    helm install airflow ./ --namespace airflow --create-namespace -f values.yaml
+
+7. 필요 이미지
+  [ned@samsungfire-master1 airflow]$ kubectl describe po |grep -i image: |awk '{print $2}'
+  docker.io/bitnami/minideb:stretch
+  docker.io/bitnami/postgresql:11.5.0-debian-9-r60
+  redis:6-buster
+  apache/airflow:2.0.2
+  apache/airflow:airflow-statsd-exporter-2021.04.28-v0.17.0
+
+
+8. 파드 리스트 및 관계도
+    PostgreSQL (airflow-postgresql-0):
+
+    PostgreSQL은 Airflow의 메타데이터 데이터베이스 역할을 합니다. 이는 Airflow가 작업을 관리하고, DAG 및 작업 실행 상태를 저장하는 데 필수적이기 때문에 가장 먼저 정상화되어야 합니다.
+    정상화되지 않으면 Airflow 관련 작업(예: 스케줄러, 웹서버, 워커)이 작동하지 않습니다.
+    Redis (airflow-redis-0):
+
+    Redis는 Airflow에서 메시지 브로커로 사용되며, 작업 큐를 관리하는 역할을 합니다.
+    특히 CeleryExecutor를 사용하는 경우, Redis가 작업을 관리하고 워커에게 전달하기 때문에 반드시 필요합니다.
+    Redis가 준비되지 않으면 작업을 스케줄링하고 분배하는 Celery 작업이 실패할 수 있습니다.
+    Airflow Migrations (airflow-run-airflow-migrations-pjjcs):
+
+    데이터베이스 마이그레이션 작업은 Airflow가 데이터베이스 스키마를 최신 상태로 유지하는 데 필요합니다. PostgreSQL이 준비된 후 데이터베이스 마이그레이션이 성공적으로 완료되어야 다른 서비스들이 시작할 수 있습니다.
+    마이그레이션이 완료되지 않으면 다른 Airflow 서비스들이 올바르게 동작하지 않을 수 있습니다.
+    Scheduler (airflow-scheduler-845c4d6b6c-85zh7):
+
+    Airflow 스케줄러는 DAG를 실행하고 작업을 예약하는 핵심 컴포넌트입니다. Redis와 PostgreSQL이 정상화된 후 스케줄러가 실행되어야 합니다.
+    스케줄러가 동작하지 않으면 작업이 실행되지 않습니다.
+    Worker (airflow-worker-0):
+
+    워커는 Airflow에서 실제 작업을 실행하는 역할을 합니다. 스케줄러가 작업을 예약하면 워커가 이를 받아 실행합니다.
+    스케줄러와 Redis가 정상화된 후 워커가 실행됩니다.
+    Webserver (airflow-webserver-7676588db4-zkwwr):
+
+    웹서버는 사용자 인터페이스를 제공하며, DAGs를 확인하고 작업 상태를 모니터링할 수 있게 해줍니다.
+    스케줄러와 데이터베이스가 정상적으로 동작한 후 웹서버가 실행되어야 합니다.
+    StatsD (airflow-statsd-5bcb9dd76-pst5m) 및 Flower (airflow-flower-95dd86f86-gbr7h):
+
+    StatsD는 모니터링을 위한 메트릭 수집 도구이고, Flower는 Celery 작업 모니터링 툴입니다.
+    이는 Airflow의 필수 구성 요소는 아니지만, 모니터링이나 성능 관리가 필요하다면 해당 컴포넌트들이 정상적으로 실행되어야 합니다.
+    정리된 순서:
+    PostgreSQL
+    Redis
+    Airflow Migrations
+    Scheduler
+    Worker
+    Webserver
+    StatsD (옵션)
+    Flower (옵션)
+    각 컴포넌트가 정상화되지 않으면 이후 단계의 파드들이 제대로 동작하지 않을 수 있으므로, 이 순서를 따라 각각의 파드 상태를 점검하면서 문제를 해결하는 것이 좋습니다.
